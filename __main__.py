@@ -44,10 +44,10 @@ def get_tx(txid):
 	return json_tx
 
 
-def get_ancestor(txid, address=None, vout_target=None):
+def get_ancestors(txid, address=None, target=None):
 	json_tx = get_tx(txid)
 
-	if address is not None and vout_target is None:
+	if address != None:
 		vout_buffer = 0
 		vout_target = (0, 0)
 
@@ -61,6 +61,9 @@ def get_ancestor(txid, address=None, vout_target=None):
 				break
 
 			vout_buffer += vout_value
+
+	if target != None:
+		vout_target = target
 
 	vin_buffer = 0
 	vin_ranges = []
@@ -122,12 +125,12 @@ def main(args):
 		
 		for txid in addr["txids"]:
 			print("analyzing", txid)
-			ancestors = get_ancestor(txid, address=addr["address"])
+			ancestors = get_ancestors(txid, address=addr["address"])
 			
 			while len(ancestors) > 0:
 				ancestor = ancestors.pop()
 				#print(ancestor, len(ancestors_array))
-				new_ancestors = get_ancestor(ancestor["txid"], vout_target=ancestor["range"])
+				new_ancestors = get_ancestors(ancestor["txid"], vout_target=ancestor["range"])
 				ancestors += new_ancestors
 
 if __name__ == "__main__":
