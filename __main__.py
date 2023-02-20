@@ -1,49 +1,51 @@
 from argparse import ArgumentParser
-from binascii import  a2b_hex
+from binascii import a2b_hex
 from base64 import b64encode
 import os, requests, json
 
+
 def process_cookie(cookie_path):
-	cookie_data = ""
+    cookie_data = ""
 
-	if not os.path.isfile(cookie_path):
-		return None, None
+    if not os.path.isfile(cookie_path):
+        return None, None
 
-	with open(cookie_path) as f:
-		cookie_data = f.read()
+    with open(cookie_path) as f:
+        cookie_data = f.read()
 
-	if len(cookie_data) == 0:
-		return None, None
+    if len(cookie_data) == 0:
+        return None, None
 
-	cookie_data = cookie_data.split(":")
+    cookie_data = cookie_data.split(":")
 
-	if len(cookie_data) != 2:
-		return None, None
+    if len(cookie_data) != 2:
+        return None, None
 
-	return (cookie_data[0], cookie_data[1])
+    return (cookie_data[0], cookie_data[1])
 
 
 def rpc_request(method, params=[]):
-	payload = json.dumps({
-		"jsonrpc": "2.0",
-		"id": "1e8",
-		"method": method,
-		"params": [p for p in params]
-	})
+    payload = json.dumps(
+        {"jsonrpc": "2.0", "id": "1e8", "method": method, "params": [p for p in params]}
+    )
 
-	req = requests.post(hostport, auth=credentials, data=payload)
+    req = requests.post(hostport, auth=credentials, data=payload)
 
-	if req.status_code != 200:
-		return None
+    if req.status_code != 200:
+        return None
 
-	return req.json()["result"]
+    return req.json()["result"]
 
 
 def get_tx(txid):
-	raw_tx = rpc_request("getrawtransaction", [txid])
-	json_tx = rpc_request("decoderawtransaction", [raw_tx])
+    raw_tx = rpc_request("getrawtransaction", [txid])
+    return rpc_request("decoderawtransaction", [raw_tx])
 
-	return json_tx
+
+def get_block(height):
+    block_hash = rpc_request("getblockhash", [height])
+    return rpc_request("getblock", [block_hash])
+
 
 def parse_varint(s):
     if s[0] < 0xFD:
@@ -60,77 +62,74 @@ def parse_varint(s):
 
 
 def find_ordinals(blocks_to_search):
-	blockcount = rpc_request("getblockcount")
+    blockcount = rpc_request("getblockcount")
 
-	for block_height in range(blockcount - blocks_to_search, blockcount + 1):
+    for block_height in range(blockcount - blocks_to_search, blockcount + 1):
+        block = get_block(block_height)
+        print(f"processing block #{block_height} with {len(block['tx'])} transactions")
 
-		block_hash = rpc_request("getblockhash", [block_height])
-		block = rpc_request("getblock", [block_hash])
+        for tx_hash in block["tx"]:
+            tx = get_tx(tx_hash)
 
-		#print(f"processing block #{block_height} with {len(block['tx'])} transactions")
+            for vin in tx["vin"]:
+                if not "txinwitness" in vin:
+                    continue
 
-		for tx_hash in block["tx"]:
-			tx = get_tx(tx_hash)
-	
-			for vin in tx["vin"]:
-				if not "txinwitness" in vin:
-					continue
+                for witness in vin["txinwitness"]:
+                    bin_witness = a2b_hex(witness)
+                    p = 0
 
-				for witness in vin["txinwitness"]:
-					bin_witness = a2b_hex(witness)
-					p = 0
-					
-					if not b"ord" in bin_witness:
-						continue
+                    if not b"ord" in bin_witness:
+                        continue
 
-					len_program, c = parse_varint(bin_witness)
-					p += c
-					program = bin_witness[p:p+len_program]
-					p += len_program + 9
+                    len_program, c = parse_varint(bin_witness)
+                    p += c
+                    program = bin_witness[p : p + len_program]
+                    p += len_program + 9
 
-					len_mimetype, c = parse_varint(bin_witness[p:])
-					p += c
-					mimetype = bin_witness[p:p+len_mimetype]
+                    len_mimetype, c = parse_varint(bin_witness[p:])
+                    p += c
+                    mimetype = bin_witness[p : p + len_mimetype]
 
-					if not b"/" in mimetype:
-						continue
+                    if not b"/" in mimetype:
+                        continue
 
-					p += len_mimetype + 1
+                    p += len_mimetype + 1
 
-					len_metadata, c = parse_varint(bin_witness[p:])
-					p += c
-					metadata = bin_witness[p:p+len_metadata]
-					p += len_metadata
-					
-					mimetype = mimetype.decode("utf-8")
-					b64_metadata = b64encode(metadata).decode("utf-8")
+                    len_metadata, c = parse_varint(bin_witness[p:])
+                    p += c
+                    metadata = bin_witness[p : p + len_metadata]
+                    p += len_metadata
 
-					print(f'data:{mimetype};base64,{b64_metadata}')
-					print(tx)
+                    mimetype = mimetype.decode("utf-8")
+                    b64_metadata = b64encode(metadata).decode("utf-8")
+
+                    print(f"data:{mimetype};base64,{b64_metadata}")
 
 
 def main(args):
-	global credentials
-	global hostport
+    global credentials
+    global hostport
 
-	credentials = process_cookie(args.cookie)
+    credentials = process_cookie(args.c)
 
-	if credentials == (None, None):
-		exit()
+    if credentials == (None, None):
+        exit()
 
-	if args.network == "mainnet":
-		hostport = "http://127.0.0.1:8332"
+    if args.n == "mainnet":
+        hostport = "http://127.0.0.1:8332"
 
-	if args.network == "testnet":
-		hostport = "http://127.0.0.1:18332"
+    if args.n == "testnet":
+        hostport = "http://127.0.0.1:18332"
 
-	find_ordinals(args.blocks)
+    find_ordinals(args.b)
+
 
 if __name__ == "__main__":
-	parser = ArgumentParser(description="Find the rarity of your satoshis")
-	parser.add_argument("--cookie", help="Bitcoind RPC cookie", required=True)
-	parser.add_argument("--network", help="mainnet/testnet/regtest", required=True)
-	parser.add_argument("--blocks", type=int, help="how many blocks to process since blockcount", required=True)
-	args = parser.parse_args()
+    parser = ArgumentParser(description="Find the rarity of your satoshis")
+    parser.add_argument("-c", help="Bitcoind RPC cookie", required=True)
+    parser.add_argument("-n", help="mainnet/testnet", required=True)
+    parser.add_argument("-b", type=int, help="how many blocks to process", required=True)
+    args = parser.parse_args()
 
-	main(args)
+    main(args)
