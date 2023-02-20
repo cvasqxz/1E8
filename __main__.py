@@ -1,4 +1,6 @@
 from argparse import ArgumentParser
+from binascii import  a2b_hex
+from base64 import b64encode
 import os, requests, json
 
 def process_cookie(cookie_path):
@@ -43,62 +45,68 @@ def get_tx(txid):
 
 	return json_tx
 
+def parse_varint(s):
+    if s[0] < 0xFD:
+        return s[0], 1
 
-def get_ancestors(txid, address=None, target=None):
-	json_tx = get_tx(txid)
+    if s[0] == 0xFD:
+        return int.from_bytes(s[1:4], "little"), 3
 
-	if address != None:
-		vout_buffer = 0
-		vout_target = (0, 0)
+    if s[0] == 0xFE:
+        return int.from_bytes(s[1:5], "little"), 5
 
-		for vout in json_tx["vout"]:
-			vout_address = vout["scriptPubKey"]["address"]
-			vout_value = int(round(vout["value"]*1e8, 0))
+    if s[0] == 0xFF:
+        return int.from_bytes(s[1:9], "little"), 9
 
-			if address == vout_address:
-				start_point = vout_buffer + 1 if vout_buffer > 0 else 0
-				vout_target = (start_point, vout_buffer + vout_value)
-				break
 
-			vout_buffer += vout_value
+def find_ordinals(blocks_to_search):
+	blockcount = rpc_request("getblockcount")
 
-	if target != None:
-		vout_target = target
+	for block_height in range(blockcount - blocks_to_search, blockcount + 1):
 
-	vin_buffer = 0
-	vin_ranges = []
+		block_hash = rpc_request("getblockhash", [block_height])
+		block = rpc_request("getblock", [block_hash])
 
-	for vin in json_tx["vin"]:
-		if "coinbase" in vin:
-			print("GENESIS FOUND:", txid)
-			return []
+		#print(f"processing block #{block_height} with {len(block['tx'])} transactions")
 
-		input_tx = get_tx(vin["txid"])
-		input_value = input_tx["vout"][vin["vout"]]["value"]
-		input_value = int(round(input_value*1e8, 0))
+		for tx_hash in block["tx"]:
+			tx = get_tx(tx_hash)
+	
+			for vin in tx["vin"]:
+				if not "txinwitness" in vin:
+					continue
 
-		if len(json_tx["vin"]) == 1:
-			vin_ranges.append({"txid": vin["txid"], "range": vout_target})
-			break
+				for witness in vin["txinwitness"]:
+					bin_witness = a2b_hex(witness)
+					p = 0
+					
+					if not b"ord" in bin_witness:
+						continue
 
-		vin_range = range(vin_buffer, vin_buffer + input_value)
+					len_program, c = parse_varint(bin_witness)
+					p += c
+					program = bin_witness[p:p+len_program]
+					p += len_program + 9
 
-		if vout_target[0] in vin_range or vout_target[1] in vin_range:
+					len_mimetype, c = parse_varint(bin_witness[p:])
+					p += c
+					mimetype = bin_witness[p:p+len_mimetype]
 
-			start_point = vin_buffer + 1 if vin_buffer > 0 else 0
-			end_point = vin_buffer + input_value
+					if not b"/" in mimetype:
+						continue
 
-			if start_point < vout_target[0]:
-				start_point = vout_target[0]
+					p += len_mimetype + 1
 
-			if end_point > vout_target[1]:
-				end_point = vout_target[1]
-			
-			vin_ranges.append({"txid": vin["txid"], "range": (start_point, end_point)})
+					len_metadata, c = parse_varint(bin_witness[p:])
+					p += c
+					metadata = bin_witness[p:p+len_metadata]
+					p += len_metadata
+					
+					mimetype = mimetype.decode("utf-8")
+					b64_metadata = b64encode(metadata).decode("utf-8")
 
-		vin_buffer += input_value
-
-	return vin_ranges
+					print(f'data:{mimetype};base64,{b64_metadata}')
+					print(tx)
 
 
 def main(args):
@@ -116,27 +124,13 @@ def main(args):
 	if args.network == "testnet":
 		hostport = "http://127.0.0.1:18332"
 
-	received_by_address = rpc_request("listreceivedbyaddress")
-
-	ancestors_array = []
-
-	for addr in received_by_address:
-		print(f"Address {addr['address']} found with {addr['amount']} BTC ({ len(addr['txids']) } Transaction IDs)")
-		
-		for txid in addr["txids"]:
-			print("analyzing", txid)
-			ancestors = get_ancestors(txid, address=addr["address"])
-			
-			while len(ancestors) > 0:
-				ancestor = ancestors.pop()
-				#print(ancestor, len(ancestors_array))
-				new_ancestors = get_ancestors(ancestor["txid"], vout_target=ancestor["range"])
-				ancestors += new_ancestors
+	find_ordinals(args.blocks)
 
 if __name__ == "__main__":
 	parser = ArgumentParser(description="Find the rarity of your satoshis")
-	parser.add_argument("--cookie", default="Bitcoind RPC cookie")
-	parser.add_argument("--network", default="mainnet/testnet/regtest")
+	parser.add_argument("--cookie", help="Bitcoind RPC cookie", required=True)
+	parser.add_argument("--network", help="mainnet/testnet/regtest", required=True)
+	parser.add_argument("--blocks", type=int, help="how many blocks to process since blockcount", required=True)
 	args = parser.parse_args()
 
 	main(args)
