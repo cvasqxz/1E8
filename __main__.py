@@ -1,18 +1,43 @@
 from argparse import ArgumentParser
-from binascii import unhexlify
+from binascii import a2b_hex
 from base64 import b64encode
-import os, requests, json
+import os, requests, json, subprocess
 
 
 def process_cookie(cookie_path):
+    cookie_data = ""
+
+    if not os.path.isfile(cookie_path):
+        return None, None
+
     with open(cookie_path) as f:
-        cookie_data = f.read().split(":")
-        return (cookie_data[0], cookie_data[1])
+        cookie_data = f.read()
+
+    if len(cookie_data) == 0:
+        return None, None
+
+    cookie_data = cookie_data.split(":")
+
+    if len(cookie_data) != 2:
+        return None, None
+
+    return (cookie_data[0], cookie_data[1])
 
 
 def rpc_request(method, params=[]):
-    payload = json.dumps({"jsonrpc": "2.0", "id": "1e8", "method": method, "params": [p for p in params]})
+    payload = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "id": "1e8",
+            "method": method,
+            "params": [p for p in params]
+        }
+    )
+
     req = requests.post(hostport, auth=credentials, data=payload)
+
+    if req.status_code != 200:
+        return None
 
     return req.json()["result"]
 
@@ -41,100 +66,20 @@ def parse_varint(s):
         return int.from_bytes(s[1:9], "little"), 9
 
 
-def find_ordinals(block_height):
-    found = []
+def find_ordinals(blocks_to_search):
+    blockcount = rpc_request("getblockcount")
 
-    #block_count = rpc_request("getblockcount")
+    for block_height in range(blockcount - blocks_to_search, blockcount + 1):
+        block = get_block(block_height)
+        print(f"processing block #{block_height} with {len(block['tx'])} transactions")
 
-    block = get_block(block_height)
-    print(f"processing block #{block_height} with {len(block['tx'])} transactions")
+        for tx_hash in block["tx"]:
+            tx = get_tx(tx_hash)
 
-    for tx_hash in block["tx"]:
-        tx = get_tx(tx_hash)
-
-        for vin in tx["vin"]:
-            # ONLY READ SEGWIT TX
-            if not "txinwitness" in vin:
-                continue
-
-            vin_pos = 0
-            for witness in vin["txinwitness"]:
-                bin_witness = unhexlify(witness)
-
-                # IGNORE WITNESS WITHOUT 'ord' or '/'
-                if not b"ord" in bin_witness or not b"/" in bin_witness:
-                    continue
-                
-                # POINTER 
-                p = 0
-                metadata = b""
-
-                len_program, c = parse_varint(bin_witness)
-                p += c
-                program = bin_witness[p : p + len_program]
-                p += len_program + 9
-
-                len_mimetype, c = parse_varint(bin_witness[p:])
-                p += c
-                mimetype = bin_witness[p : p + len_mimetype]
-                p += len_mimetype
-
-                # IGNORE WEIRD MIMETYPE
-                if not b"/" in mimetype:
-                    continue
-
-                # IGNORE CURSED ORDINALS
-                if bin_witness[p] != 0x00:
-                    continue
-
-                # OP_0
-                p += 1
-                
-                while (p + 1) < len(bin_witness):
-
-                    # PUSHDATA (0x01 to 0x4b)
-                    if bin_witness[p] <= 0x4b:
-                        len_chunk = bin_witness[p]
-                        p += 1
-
-                    # OP_PUSHDATA1
-                    elif bin_witness[p] == 0x4c:
-                        len_chunk = bin_witness[p+1]
-                        p += 2
-
-                    # OP_PUSHDATA2
-                    elif bin_witness[p] == 0x4d:
-                        len_chunk = int.from_bytes(bin_witness[p + 1 : p + 3], "little")
-                        p += 3
-
-                    # OP_PUSHDATA4
-                    elif bin_witness[p] == 0x4e:
-                        len_chunk = int.from_bytes(bin_witness[p + 1 : p + 5], "little")
-                        p += 5
-    
-                    else:
-                        p += 1
-                        print(f"FATAL ERROR, INVALID OPCODE {bin_witness[p]} BLOCK {block_height} TX {tx_hash}")
-                        exit()
-                        
-                    
-                    metadata += bin_witness[p : p + len_chunk]
-                    p += len_chunk
-
-                if not p + 1 == len(bin_witness):
-                    print(f"FATAL ERROR BLOCK {block_height} TX {tx_hash}")
-                    exit()
-
-                mimetype = mimetype.decode("utf-8")
-                b64_metadata = b64encode(metadata).decode("utf-8")
-
-                final_inscription = f"data:{mimetype};base64,{b64_metadata}"
-                found.append(final_inscription)
-
-                print(f"{tx_hash}:{vin_pos}")
-                print(final_inscription)
-                vin_pos += 1
-
+            for vout in tx['vout']:
+                if vout['scriptPubKey']['asm'].startswith("OP_RETURN 13"):
+                    print(tx['txid'])
+                    print(vout['scriptPubKey'])
 
 
 def main(args):
@@ -142,20 +87,24 @@ def main(args):
     global hostport
 
     credentials = process_cookie(args.c)
-    hostport = "http://127.0.0.1:8332"
 
-    start = 767430 if (args.s is None) or (args.s < 767430) else args.s
-    end = rpc_request("getblockcount") if args.f is None else args.f
+    if credentials == (None, None):
+        exit()
 
-    for block in range(start, end):
-        find_ordinals(block)
+    if args.n == "mainnet":
+        hostport = "http://127.0.0.1:8332"
+
+    if args.n == "testnet":
+        hostport = "http://127.0.0.1:18332"
+
+    find_ordinals(args.b)
 
 
 if __name__ == "__main__":
     parser = ArgumentParser(description="Find the rarity of your satoshis")
     parser.add_argument("-c", help="Bitcoind RPC cookie", required=True)
-    parser.add_argument("-s", type=int, help="start block height")
-    parser.add_argument("-f", type=int, help="end block height")
+    parser.add_argument("-n", help="mainnet/testnet", required=True)
+    parser.add_argument("-b", type=int, help="how many blocks to process", required=True)
     args = parser.parse_args()
 
     main(args)
